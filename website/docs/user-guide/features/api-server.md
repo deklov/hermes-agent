@@ -216,9 +216,14 @@ X-Hermes-Session-Id: openwebui-chat-42
 The header is authoritative for transcript identity even alongside
 `previous_response_id` or `conversation`. When a request carries only its new
 input, Hermes recovers that transcript's persisted `state.db` history, including
-after a gateway restart. Explicit `conversation_history`, a multi-message
-`input`, or a `previous_response_id`/`conversation` response chain supplies the
-request context instead and is never combined with the header-loaded history.
+after a gateway restart. A client that replays its whole conversation in a
+multi-message `input` (Open WebUI does) gets the same once the transcript
+exists: the persisted history stays authoritative, as with `X-Hermes-Session-Id`
+on `/v1/chat/completions`, and only the newest user message is taken from
+`input`. Explicit `conversation_history`, a multi-message `input` for a
+transcript Hermes does not know yet, or a `previous_response_id`/`conversation`
+response chain supplies the request context instead and is never combined with
+the header-loaded history.
 If Hermes rotated the client transcript during compression, the header resolves
 to the stored post-compression session before its history is loaded.
 
