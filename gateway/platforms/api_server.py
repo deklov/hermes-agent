@@ -796,7 +796,9 @@ class ResponseStore:
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key, X-Hermes-Session-Id"}
+    "Access-Control-Allow-Headers": (
+        "Authorization, Content-Type, Idempotency-Key, "
+        "X-Hermes-Session-Id, X-Hermes-Session-Key")}
 _SECURITY_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
@@ -1214,6 +1216,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         # clients that choke on named events (#12020). Default on.
         self._tool_progress_events: bool = _coerce_request_bool(
             extra.get("tool_progress_events"), default=True)
+        # Responses keeps server-managed identity unless explicitly delegated to the client.
+        self._responses_client_managed_session_id: bool = _coerce_request_bool(
+            extra.get("responses_client_managed_session_id"), default=False)
         self._app: Optional["web.Application"] = None
         self._runner: Optional["web.AppRunner"] = None
         self._site: Optional["web.TCPSite"] = None
@@ -1857,6 +1862,27 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             if store is None:
                 store = self._response_stores[str(home)] = ResponseStore(db_path=str(home / "response_store.db"))
             return store
+
+    def _parse_session_id_header(
+        self, request: "web.Request"
+    ) -> tuple[Optional[str], Optional["web.Response"]]:
+        """Validate an optional caller-selected ``X-Hermes-Session-Id``."""
+        raw = request.headers.get("X-Hermes-Session-Id", "").strip()
+        if not raw:
+            return None, None
+        if not self._api_key:
+            logger.warning(
+                "Session continuation via X-Hermes-Session-Id rejected: "
+                "no API key configured. Set API_SERVER_KEY to enable session continuity.")
+            return None, _error_response(
+                "Session continuation requires API key authentication. "
+                "Configure API_SERVER_KEY to enable this feature.", 403)
+        from gateway.session import _is_path_unsafe
+        if re.search(r'[\r\n\x00]', raw) or _is_path_unsafe(raw):
+            return None, _invalid_request("Invalid session ID")
+        if len(raw) > self._MAX_SESSION_HEADER_LEN:
+            return None, _invalid_request("Session ID too long")
+        return raw, None
 
     # -- Session DB -------------------------------------------------------------------
 
@@ -2526,6 +2552,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "responses_api": True, "responses_streaming": True, "run_submission": True,
                 "runs_idempotency": _api_runs._idempotency_capabilities(self, store_type=RunIdempotencyStore),
                 **_STATIC_FEATURE_FLAGS,
+                "responses_client_managed_session_id": self._responses_client_managed_session_id,
                 "cors": bool(self._cors_origins),
                 # Always advertised for feature-detection; enabled follows config.
                 "browser_extension_control": {
