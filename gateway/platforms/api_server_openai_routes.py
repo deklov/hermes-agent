@@ -1123,13 +1123,20 @@ class OpenAICompatRoutesMixin:
             from gateway.platforms.api_server_runs import _resolve_live_session_id
             resolved_client_session_id = await _resolve_live_session_id(
                 self, provided_session_id)
-            if (
-                not has_explicit_history
-                and not previous_response_id
-                and len(input_messages) <= 1
-            ):
-                conversation_history = await self._conversation_history_for_session(
+            if not has_explicit_history and not previous_response_id:
+                stored_history = await self._conversation_history_for_session(
                     resolved_client_session_id)
+                if len(input_messages) <= 1:
+                    conversation_history = stored_history
+                elif stored_history:
+                    # A client that replays its whole conversation in ``input`` (Open WebUI)
+                    # continues a transcript Hermes already holds: the stored history, tool
+                    # calls included, stays authoritative, as with X-Hermes-Session-Id on
+                    # /v1/chat/completions, and only the newest user message is new.
+                    conversation_history = stored_history
+                    input_messages = [next(
+                        (m for m in reversed(input_messages) if m.get("role") == "user"),
+                        input_messages[-1])]
         # All input messages but the last become history; the last is the user message.
         conversation_history.extend(input_messages[:-1])
         user_message: Any = input_messages[-1].get("content", "") if input_messages else ""

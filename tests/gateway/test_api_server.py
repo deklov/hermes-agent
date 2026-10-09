@@ -2680,6 +2680,101 @@ class TestSessionIdHeader:
             await restarted_adapter.disconnect()
 
     @pytest.mark.asyncio
+    async def test_responses_session_header_prefers_transcript_over_replayed_input(
+        self, tmp_path, monkeypatch
+    ):
+        """A client replaying its conversation in ``input`` continues the stored transcript."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        session_id = "openwebui-chat-7"
+        adapter = _make_adapter(
+            api_key="sk-secret", responses_client_managed_session_id=True
+        )
+        db = await adapter._ensure_session_db_async()
+        db.create_session(session_id, source="api_server")
+        db.append_message(session_id, "user", "persisted question")
+        db.append_message(session_id, "assistant", "persisted answer")
+        app = _create_app(adapter)
+        try:
+            async with TestClient(TestServer(app)) as cli:
+                with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                    mock_run.return_value = (
+                        {"final_response": "continued", "messages": [], "api_calls": 1},
+                        {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                    )
+                    resp = await cli.post(
+                        "/v1/responses",
+                        headers={
+                            "Authorization": "Bearer sk-secret",
+                            "X-Hermes-Session-Id": session_id,
+                        },
+                        json={
+                            "model": "hermes-agent",
+                            "input": [
+                                {"role": "user", "content": "client copy of the question"},
+                                {"type": "function_call", "call_id": "c1", "name": "web_search",
+                                 "arguments": "{}"},
+                                {"type": "function_call_output", "call_id": "c1", "output": "x"},
+                                {"role": "assistant", "content": "client copy of the answer"},
+                                {"role": "user", "content": "new question"},
+                            ],
+                        },
+                    )
+
+            assert resp.status == 200
+            kwargs = mock_run.call_args.kwargs
+            assert kwargs["session_id"] == session_id
+            assert [(m["role"], m["content"]) for m in kwargs["conversation_history"]] == [
+                ("user", "persisted question"),
+                ("assistant", "persisted answer"),
+            ]
+            assert kwargs["user_message"] == "new question"
+        finally:
+            await adapter.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_responses_session_header_uses_replayed_input_for_unknown_transcript(
+        self, tmp_path, monkeypatch
+    ):
+        """Without a stored transcript, the client's replayed context is the history."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        adapter = _make_adapter(
+            api_key="sk-secret", responses_client_managed_session_id=True
+        )
+        app = _create_app(adapter)
+        try:
+            async with TestClient(TestServer(app)) as cli:
+                with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                    mock_run.return_value = (
+                        {"final_response": "ok", "messages": [], "api_calls": 1},
+                        {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                    )
+                    resp = await cli.post(
+                        "/v1/responses",
+                        headers={
+                            "Authorization": "Bearer sk-secret",
+                            "X-Hermes-Session-Id": "openwebui-chat-new",
+                        },
+                        json={
+                            "model": "hermes-agent",
+                            "input": [
+                                {"role": "user", "content": "earlier question"},
+                                {"role": "assistant", "content": "earlier answer"},
+                                {"role": "user", "content": "new question"},
+                            ],
+                        },
+                    )
+
+            assert resp.status == 200
+            kwargs = mock_run.call_args.kwargs
+            assert [(m["role"], m["content"]) for m in kwargs["conversation_history"]] == [
+                ("user", "earlier question"),
+                ("assistant", "earlier answer"),
+            ]
+            assert kwargs["user_message"] == "new question"
+        finally:
+            await adapter.disconnect()
+
+    @pytest.mark.asyncio
     async def test_responses_session_header_requires_configured_api_key(self):
         adapter = _make_adapter(responses_client_managed_session_id=True)
         app = _create_app(adapter)
